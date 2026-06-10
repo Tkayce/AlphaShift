@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useState } from 'react';
 import { Dimensions, Text, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { runOnJS, useSharedValue } from 'react-native-reanimated';
@@ -35,26 +35,26 @@ export const AlphaGrid: React.FC<AlphaGridProps> = ({
   onTouchMove,
   onTouchEnd,
 }) => {
-  const layoutRef = useRef<{ x: number; y: number; width: number; height: number }>({ x: 0, y: 0, width: 0, height: 0 });
+  const [layoutSize, setLayoutSize] = useState({ width: 0, height: 0 });
+  const layoutWidth = useSharedValue(0);
+  const layoutHeight = useSharedValue(0);
   const lastTouchedRow = useSharedValue(-1);
   const lastTouchedCol = useSharedValue(-1);
   const endedThisGesture = useSharedValue(false);
 
   const handleTouch = (x: number, y: number, isMove: boolean) => {
     'worklet';
-    if (!layoutRef.current.width) return;
+    if (!layoutWidth.value || !layoutHeight.value) return;
 
-    // Use relative coordinates from the gesture if possible, 
-    // but Gesture events provide absolute or relative to the component.
-    // In GH v2, x and y are relative to the view the gesture is attached to.
-    
-    // Increase the "hit area" of each tile slightly for smoother dragging
-    // ACTUAL_CELL_SIZE is 64 (56 size + 8 margin)
-    // We can use a small buffer to make it easier to trigger the tile
-    const paddingOffset = 4;
+    const gridPixelSize = GRID_SIZE * ACTUAL_CELL_SIZE;
+    const originX = Math.max(0, (layoutWidth.value - gridPixelSize) / 2);
+    const originY = Math.max(0, (layoutHeight.value - gridPixelSize) / 2);
+
     const hitBuffer = 12;
-    const col = Math.floor((x - paddingOffset + hitBuffer) / ACTUAL_CELL_SIZE);
-    const row = Math.floor((y - paddingOffset + hitBuffer) / ACTUAL_CELL_SIZE);
+    const localX = x - originX;
+    const localY = y - originY;
+    const col = Math.floor((localX + hitBuffer) / ACTUAL_CELL_SIZE);
+    const row = Math.floor((localY + hitBuffer) / ACTUAL_CELL_SIZE);
 
     if (row >= 0 && row < GRID_SIZE && col >= 0 && col < GRID_SIZE) {
       if (isMove && row === lastTouchedRow.value && col === lastTouchedCol.value) return;
@@ -89,13 +89,18 @@ export const AlphaGrid: React.FC<AlphaGridProps> = ({
     });
 
   const renderLines = (path: { row: number; col: number }[], color: string, opacity: number, strokeWidth: string) => {
+    const gridPixelSize = GRID_SIZE * ACTUAL_CELL_SIZE;
+    const originX = Math.max(0, (layoutSize.width - gridPixelSize) / 2);
+    const originY = Math.max(0, (layoutSize.height - gridPixelSize) / 2);
+    const tileCenterOffset = TILE_SIZE / 2 + TILE_MARGIN / 2;
+
     return path.map((curr, idx) => {
       if (idx === 0) return null;
       const prev = path[idx - 1];
-      const x1 = prev.col * ACTUAL_CELL_SIZE + TILE_SIZE / 2 + TILE_MARGIN / 2 + 4;
-      const y1 = prev.row * ACTUAL_CELL_SIZE + TILE_SIZE / 2 + TILE_MARGIN / 2 + 4;
-      const x2 = curr.col * ACTUAL_CELL_SIZE + TILE_SIZE / 2 + TILE_MARGIN / 2 + 4;
-      const y2 = curr.row * ACTUAL_CELL_SIZE + TILE_SIZE / 2 + TILE_MARGIN / 2 + 4;
+      const x1 = originX + prev.col * ACTUAL_CELL_SIZE + tileCenterOffset;
+      const y1 = originY + prev.row * ACTUAL_CELL_SIZE + tileCenterOffset;
+      const x2 = originX + curr.col * ACTUAL_CELL_SIZE + tileCenterOffset;
+      const y2 = originY + curr.row * ACTUAL_CELL_SIZE + tileCenterOffset;
 
       return (
         <Line
@@ -114,9 +119,10 @@ export const AlphaGrid: React.FC<AlphaGridProps> = ({
     <GestureDetector gesture={gesture}>
       <View
         onLayout={(e) => {
-          // GH v2 events are relative to the component, so we just need to know if we have layout
           const { width, height } = e.nativeEvent.layout;
-          layoutRef.current = { x: 0, y: 0, width, height };
+          setLayoutSize({ width, height });
+          layoutWidth.value = width;
+          layoutHeight.value = height;
         }}
         style={s`w-full aspect-square bg-slate-900 rounded-3xl p-1 justify-center items-center relative overflow-hidden`}
       >
