@@ -50,3 +50,4 @@ Build this game professionally and ensure it is compatible with web (I am testin
 
 We will use deep orange color, black for background, text in white, and buttons in deep orange and white (use where needed). 
 
+Fully merged abundantly
