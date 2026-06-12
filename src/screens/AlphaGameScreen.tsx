@@ -1,10 +1,41 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, SafeAreaView, Modal } from 'react-native';
-import { s } from 'react-native-wind';
 import { useRouter } from 'expo-router';
-import { Settings, Lightbulb, RotateCcw, XCircle } from 'lucide-react-native';
+import { Lightbulb, RotateCcw, Settings, Trophy, XCircle } from 'lucide-react-native';
+import React from 'react';
+import { Modal, SafeAreaView, Text, TouchableOpacity, View } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
+import { s } from 'react-native-wind';
 import { AlphaGrid } from '../components/AlphaGrid';
 import { useSpellingEngine } from '../hooks/useSpellingEngine';
+
+const AnimatedCounter = ({ label, value, accent }: { label: string; value: number | string; accent: string }) => {
+  const scale = useSharedValue(1);
+
+  React.useEffect(() => {
+    scale.value = withSequence(
+      withTiming(1.12, { duration: 120 }),
+      withSpring(1, { damping: 10, stiffness: 220 })
+    );
+  }, [scale, value]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  return (
+    <View style={s`bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex-1`}>
+      <Text style={s`text-gray-400 text-xs font-bold uppercase tracking-widest`}>{label}</Text>
+      <Animated.Text style={[s`text-xl font-medium text-white mt-1`, { color: accent }, animatedStyle]}>
+        {value}
+      </Animated.Text>
+    </View>
+  );
+};
 
 const AlphaGameScreen = () => {
   const router = useRouter();
@@ -16,7 +47,17 @@ const AlphaGameScreen = () => {
     isCorrect,
     hintPath,
     difficulty,
+    maxAttempts,
+    attemptsLeft,
+    levelScore,
+    passScore,
+    revealUsesLeft,
     showErrorPopup,
+    showLevelOverModal,
+    canAdvanceFromLevelOver,
+    replayLevel,
+    closeLevelOverModal,
+    advanceFromLevelOver,
     onTouchStart,
     onTouchMove,
     onTouchEnd,
@@ -25,6 +66,9 @@ const AlphaGameScreen = () => {
   } = useSpellingEngine();
 
   const isHintActive = hintPath.length > 0;
+  const canReveal = difficulty !== 'Easy' && !isHintActive && (revealUsesLeft === null || revealUsesLeft > 0);
+  const revealLabel = revealUsesLeft === null ? 'Reveal Word' : `Reveal Word (${revealUsesLeft} left)`;
+  const revealCounterText = revealUsesLeft === null ? '4' : String(revealUsesLeft);
 
   return (
     <SafeAreaView style={s`flex-1 bg-black`}>
@@ -66,6 +110,19 @@ const AlphaGameScreen = () => {
           </Text>
         </View>
 
+        <View style={s`flex-row mb-4 gap-3`}>
+          <AnimatedCounter label="Attempts Left" value={attemptsLeft} accent="#f97316" />
+          <AnimatedCounter
+            label={difficulty === 'Easy' ? 'Hints Locked' : 'Reveal Left'}
+            value={difficulty === 'Easy' ? '0' : revealCounterText}
+            accent={difficulty === 'Easy' ? '#64748b' : '#eab308'}
+          />
+          <View style={s`bg-slate-900 border border-slate-800 rounded-2xl px-4 py-3 flex-1`}>
+            <Text style={s`text-slate-400 text-xs font-bold uppercase tracking-widest`}>Score</Text>
+            <Text style={s`text-white text-xl font-black mt-1`}>{levelScore}</Text>
+          </View>
+        </View>
+
         {/* Live Preview */}
         <View style={s`h-16 items-center justify-center mb-4`}>
           <Text 
@@ -102,17 +159,19 @@ const AlphaGameScreen = () => {
 
         {/* Actions Section */}
         <View style={s`flex-row justify-center mt-8 gap-4`}>
-          <TouchableOpacity
-            onPress={revealHint}
-            disabled={isHintActive}
-            style={[
-              s`flex-row items-center bg-slate-900 px-6 py-4 rounded-2xl border border-slate-800`, 
-              isHintActive && s`opacity-50`
-            ]}
-          >
-            <Lightbulb color={isHintActive ? "#475569" : "#f97316"} size={20} />
-            <Text style={[s`ml-2 font-bold`, isHintActive ? s`text-slate-600` : s`text-white`]}>Reveal Word</Text>
-          </TouchableOpacity>
+          {difficulty !== 'Easy' && (
+            <TouchableOpacity
+              onPress={revealHint}
+              disabled={!canReveal}
+              style={[
+                s`flex-row items-center bg-slate-900 px-6 py-4 rounded-2xl border border-slate-800`,
+                !canReveal && s`opacity-50`
+              ]}
+            >
+              <Lightbulb color={canReveal ? "#f97316" : "#475569"} size={20} />
+              <Text style={[s`ml-2 font-bold`, canReveal ? s`text-white` : s`text-slate-600`]}>{revealLabel}</Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             onPress={() => router.replace('/game')}
@@ -123,6 +182,60 @@ const AlphaGameScreen = () => {
           </TouchableOpacity>
         </View>
       </View>
+
+      <Modal
+        transparent={true}
+        visible={showLevelOverModal}
+        animationType="fade"
+        onRequestClose={closeLevelOverModal}
+      >
+        <View style={s`flex-1 items-center justify-center bg-black px-6`}>
+          <View style={s`bg-black p-8 rounded-3xl w-full items-center border border-slate-800`}>
+            <View style={s`w-16 h-16 bg-orange-600/20 rounded-2xl items-center justify-center`}>
+              <Trophy color="#f97316" size={36} />
+            </View>
+            <Text style={s`text-white text-2xl font-bold mt-5`}>Game Over</Text>
+            <Text style={s`text-slate-400 text-center mt-2`}>
+              You used all {maxAttempts} attempts.
+            </Text>
+
+            <View style={s`w-full mt-6`}>
+              <View style={s`flex-row items-center justify-between py-2`}>
+                <Text style={s`text-gray-400 font-bold`}>Your Score</Text>
+                <Text style={s`text-white font-bold`}>{levelScore}</Text>
+              </View>
+              <View style={s`flex-row items-center justify-between py-2`}>
+                <Text style={s`text-gray-400 font-bold`}>Pass Score</Text>
+                <Text style={s`text-white font-bold`}>{passScore}</Text>
+              </View>
+            </View>
+
+            <View style={s`flex-row gap-3 mt-7 w-full`}>
+              <TouchableOpacity
+                onPress={replayLevel}
+                style={[
+                  s`bg-slate-800 px-6 py-4 rounded-2xl items-center border border-slate-700`,
+                  canAdvanceFromLevelOver ? s`flex-1` : s`w-full`
+                ]}
+              >
+                <Text style={s`text-white font-bold`}>Replay</Text>
+              </TouchableOpacity>
+              {canAdvanceFromLevelOver && (
+                <TouchableOpacity
+                  onPress={advanceFromLevelOver}
+                  style={s`flex-1 px-6 py-4 rounded-2xl items-center border bg-orange-600 border-orange-500`}
+                >
+                  <Text style={s`text-white font-bold`}>Next Level</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <Text style={s`text-slate-500 text-xs text-center mt-5`}>
+              Trace longer words and use hints wisely to raise your score.
+            </Text>
+          </View>
+        </View>
+      </Modal>
 
       {/* Error Popup */}
       <Modal

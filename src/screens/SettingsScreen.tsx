@@ -1,16 +1,15 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, Switch, SafeAreaView, ScrollView } from 'react-native';
-import { s } from 'react-native-wind';
 import { useRouter } from 'expo-router';
-import { ArrowLeft, Volume2, Bell, Info, Shield, Zap, Flame } from 'lucide-react-native';
+import { ArrowLeft, Bell, Flame, Info, Shield, Volume2, Zap } from 'lucide-react-native';
+import React from 'react';
+import { SafeAreaView, ScrollView, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { s } from 'react-native-wind';
 import { useSpellingEngine } from '../hooks/useSpellingEngine';
 import { Difficulty } from '../utils/dictionaryData';
 
 const SettingsScreen = () => {
   const router = useRouter();
-  const { difficulty, updateDifficulty, resetGame } = useSpellingEngine();
+  const { difficulty, updateDifficulty, resetGame, soundEnabled, setSoundEnabled, filteredLevels, getBestScore } = useSpellingEngine();
   const [hapticsEnabled, setHapticsEnabled] = React.useState(true);
-  const [soundEnabled, setSoundEnabled] = React.useState(true);
 
   const difficulties: { label: Difficulty; icon: any; color: string }[] = [
     { label: 'Easy', icon: Shield, color: 'text-green-500' },
@@ -80,7 +79,7 @@ const SettingsScreen = () => {
             </View>
             <Switch 
               value={soundEnabled} 
-              onValueChange={setSoundEnabled}
+              onValueChange={(next) => { void setSoundEnabled(next); }}
               trackColor={{ false: '#1e293b', true: '#ea580c' }}
               thumbColor="white"
             />
@@ -92,6 +91,25 @@ const SettingsScreen = () => {
               <Text style={s`text-white text-lg ml-3`}>About AlphaShift</Text>
             </View>
             <Text style={s`text-slate-500`}>v1.1.0</Text>
+          </View>
+        </View>
+
+        <Text style={s`text-gray-500 text-sm font-bold uppercase tracking-widest mb-4`}>Best Scores</Text>
+        <View style={s`bg-gray-900 rounded-3xl border border-gray-800 p-4 mb-10`}>
+          <View style={s`flex-row flex-wrap justify-between`}>
+            {filteredLevels.map((level, idx) => {
+            const score = getBestScore(level.id);
+            return (
+              <View
+                key={level.id}
+                style={s`w-[48%] bg-black border border-gray-800 rounded-2xl p-4 mb-3`}
+              >
+                <Text style={s`text-gray-500 text-xs font-bold uppercase tracking-widest`}>Level {idx + 1}</Text>
+                <Text style={s`text-white text-xl font-black mt-2`}>{score > 0 ? score : '-'}</Text>
+                <Text style={s`text-gray-500 text-xs mt-1`}>{score > 0 ? 'Best run' : 'No score yet'}</Text>
+              </View>
+            );
+            })}
           </View>
         </View>
 

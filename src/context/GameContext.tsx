@@ -1,13 +1,17 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import { Asset } from 'expo-asset';
+import { Audio as ExpoAudio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
-import * as SecureStore from 'expo-secure-store';
-import { Platform } from 'react-native';
-import { LEVELS, LevelData, Difficulty } from '../utils/dictionaryData';
 import { useRouter } from 'expo-router';
+import * as SecureStore from 'expo-secure-store';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Platform } from 'react-native';
+import { Difficulty, LEVELS, LevelData } from '../utils/dictionaryData';
 
 const UNLOCKED_LEVELS_KEY = 'ALPHASHIFT_UNLOCKED_LEVELS_';
 const DIFFICULTY_KEY = 'ALPHASHIFT_DIFFICULTY';
 const CURRENT_LEVEL_ID_KEY = 'ALPHASHIFT_CURRENT_LEVEL_ID';
+const SOUND_ENABLED_KEY = 'ALPHASHIFT_SOUND_ENABLED';
+const BEST_SCORES_KEY = 'ALPHASHIFT_BEST_SCORES';
 const GRID_SIZE = 5;
 
 export interface Tile {
@@ -19,15 +23,31 @@ export interface Tile {
 
 interface GameContextType {
   currentLevel: LevelData;
+  currentLevelIndex: number;
   grid: Tile[][];
   selectedIndices: { row: number; col: number }[];
   currentWord: string;
   isCorrect: boolean | null;
   hintPath: { row: number; col: number }[];
   difficulty: Difficulty;
+  soundEnabled: boolean;
+  setSoundEnabled: (enabled: boolean) => Promise<void>;
   showErrorPopup: boolean;
   unlockedLevelCount: number;
   filteredLevels: LevelData[];
+  maxAttempts: number;
+  attemptsUsed: number;
+  attemptsLeft: number;
+  levelScore: number;
+  passScore: number;
+  revealUsesUsed: number;
+  revealUsesLeft: number | null;
+  showLevelOverModal: boolean;
+  canAdvanceFromLevelOver: boolean;
+  replayLevel: () => void;
+  closeLevelOverModal: () => void;
+  advanceFromLevelOver: () => void;
+  getBestScore: (levelId: number) => number;
   onTouchStart: (row: number, col: number) => void;
   onTouchMove: (row: number, col: number) => void;
   onTouchEnd: () => void;
@@ -45,6 +65,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [currentLevelId, setCurrentLevelId] = useState<number>(1);
   const [difficulty, setDifficulty] = useState<Difficulty>('Easy');
   const [unlockedLevelCount, setUnlockedLevelCount] = useState<number>(1);
+  const [soundEnabled, setSoundEnabledState] = useState(true);
   
   const [grid, setGrid] = useState<Tile[][]>([]);
   const [selectedIndices, setSelectedIndices] = useState<{ row: number; col: number }[]>([]);
@@ -53,16 +74,50 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [hintPath, setHintPath] = useState<{ row: number; col: number }[]>([]);
   const [targetWordPath, setTargetWordPath] = useState<{ row: number; col: number }[]>([]);
   const [showErrorPopup, setShowErrorPopup] = useState(false);
+  const [attemptsUsed, setAttemptsUsed] = useState(0);
+  const [levelScore, setLevelScore] = useState(0);
+  const [revealUsesUsed, setRevealUsesUsed] = useState(0);
+  const [showLevelOverModal, setShowLevelOverModal] = useState(false);
+  const [bestScores, setBestScores] = useState<Record<string, number>>({});
+
+  const attemptsUsedRef = useRef(0);
+  const levelScoreRef = useRef(0);
+  const musicRef = useRef<ExpoAudio.Sound | null>(null);
+  const webAudioRef = useRef<HTMLAudioElement | null>(null);
+  const webAudioUnlockHandlerRef = useRef<(() => void) | null>(null);
 
   const filteredLevels = useMemo(() => 
     LEVELS.filter(l => l.difficulty === difficulty),
     [difficulty]
   );
 
-  const currentLevel: LevelData = useMemo(() => 
-    LEVELS.find(l => l.id === currentLevelId) || filteredLevels[0] || LEVELS[0],
-    [currentLevelId, filteredLevels]
-  );
+  const currentLevelIndex = useMemo(() => {
+    const idx = filteredLevels.findIndex(l => l.id === currentLevelId);
+    return idx >= 0 ? idx : 0;
+  }, [filteredLevels, currentLevelId]);
+
+  const currentLevel: LevelData = useMemo(() => {
+    return filteredLevels[currentLevelIndex] || filteredLevels[0] || LEVELS[0];
+  }, [filteredLevels, currentLevelIndex]);
+
+  const maxAttempts = useMemo(() => {
+    if (difficulty === 'Easy') return 3;
+    if (difficulty === 'Medium') return 5;
+    return 7;
+  }, [difficulty]);
+
+  const attemptsLeft = useMemo(() => Math.max(0, maxAttempts - attemptsUsed), [maxAttempts, attemptsUsed]);
+  const passScore = useMemo(() => Math.floor(currentLevel.word.length * maxAttempts * 60), [currentLevel.word.length, maxAttempts]);
+  const canAdvanceFromLevelOver = useMemo(() => levelScore >= passScore, [levelScore, passScore]);
+  const revealLimit = useMemo(() => {
+    if (difficulty === 'Easy') return 0;
+    if (difficulty === 'Medium') return 2;
+    return 4;
+  }, [difficulty]);
+  const revealUsesLeft = useMemo(() => {
+    if (!Number.isFinite(revealLimit)) return null;
+    return Math.max(0, revealLimit - revealUsesUsed);
+  }, [revealLimit, revealUsesUsed]);
 
   // Persistence
   useEffect(() => {
@@ -70,20 +125,33 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       let savedDifficulty = 'Easy';
       let savedLevelId = '1';
       let savedUnlocked = '1';
+      let savedSoundEnabled = 'true';
+      let savedBestScores = '{}';
       
       if (Platform.OS === 'web') {
         savedDifficulty = (localStorage.getItem(DIFFICULTY_KEY) as Difficulty) || 'Easy';
         savedLevelId = localStorage.getItem(CURRENT_LEVEL_ID_KEY) || '1';
         savedUnlocked = localStorage.getItem(UNLOCKED_LEVELS_KEY + savedDifficulty) || '1';
+        savedSoundEnabled = localStorage.getItem(SOUND_ENABLED_KEY) || 'true';
+        savedBestScores = localStorage.getItem(BEST_SCORES_KEY) || '{}';
       } else {
         savedDifficulty = (await SecureStore.getItemAsync(DIFFICULTY_KEY) as Difficulty) || 'Easy';
         savedLevelId = (await SecureStore.getItemAsync(CURRENT_LEVEL_ID_KEY)) || '1';
         savedUnlocked = (await SecureStore.getItemAsync(UNLOCKED_LEVELS_KEY + savedDifficulty)) || '1';
+        savedSoundEnabled = (await SecureStore.getItemAsync(SOUND_ENABLED_KEY)) || 'true';
+        savedBestScores = (await SecureStore.getItemAsync(BEST_SCORES_KEY)) || '{}';
       }
       
       setDifficulty(savedDifficulty as Difficulty);
       setCurrentLevelId(parseInt(savedLevelId, 10));
       setUnlockedLevelCount(parseInt(savedUnlocked, 10));
+      setSoundEnabledState(savedSoundEnabled !== 'false');
+      try {
+        const parsed = JSON.parse(savedBestScores) as Record<string, number>;
+        setBestScores(parsed && typeof parsed === 'object' ? parsed : {});
+      } catch {
+        setBestScores({});
+      }
     };
     loadSettings();
   }, []);
@@ -97,6 +165,153 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await SecureStore.setItemAsync(UNLOCKED_LEVELS_KEY + diff, unlockedCount.toString());
     }
   };
+
+  const saveBestScores = async (scores: Record<string, number>) => {
+    const raw = JSON.stringify(scores);
+    if (Platform.OS === 'web') {
+      localStorage.setItem(BEST_SCORES_KEY, raw);
+    } else {
+      await SecureStore.setItemAsync(BEST_SCORES_KEY, raw);
+    }
+  };
+
+  const getBestScore = useCallback((levelId: number) => {
+    const key = String(levelId);
+    return bestScores[key] ?? 0;
+  }, [bestScores]);
+
+  const maybeUpdateBestScore = useCallback(async (levelId: number, score: number) => {
+    const key = String(levelId);
+    const nextScores = { ...bestScores };
+    if (score <= (nextScores[key] ?? 0)) return;
+    nextScores[key] = score;
+    setBestScores(nextScores);
+    await saveBestScores(nextScores);
+  }, [bestScores]);
+
+  const setSoundEnabled = useCallback(async (enabled: boolean) => {
+    setSoundEnabledState(enabled);
+    if (Platform.OS === 'web') {
+      localStorage.setItem(SOUND_ENABLED_KEY, enabled ? 'true' : 'false');
+    } else {
+      await SecureStore.setItemAsync(SOUND_ENABLED_KEY, enabled ? 'true' : 'false');
+    }
+  }, []);
+
+  useEffect(() => {
+    attemptsUsedRef.current = attemptsUsed;
+  }, [attemptsUsed]);
+
+  useEffect(() => {
+    levelScoreRef.current = levelScore;
+  }, [levelScore]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const cleanupWebAudioUnlock = () => {
+      if (!webAudioUnlockHandlerRef.current || typeof window === 'undefined') return;
+      const handler = webAudioUnlockHandlerRef.current;
+      window.removeEventListener('pointerdown', handler);
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('touchstart', handler);
+      webAudioUnlockHandlerRef.current = null;
+    };
+
+    const syncMusic = async () => {
+      try {
+        if (Platform.OS === 'web') {
+          cleanupWebAudioUnlock();
+
+          if (!soundEnabled) {
+            webAudioRef.current?.pause();
+            return;
+          }
+
+          if (!webAudioRef.current && typeof window !== 'undefined') {
+            const asset = Asset.fromModule(require('../../assets/music/bg.mp3'));
+            const audio = new window.Audio(asset.uri);
+            audio.loop = true;
+            audio.volume = 0.6;
+            audio.preload = 'auto';
+            webAudioRef.current = audio;
+          }
+
+          const playWebAudio = async () => {
+            if (!webAudioRef.current) return;
+            try {
+              await webAudioRef.current.play();
+              cleanupWebAudioUnlock();
+            } catch {
+            }
+          };
+
+          await playWebAudio();
+
+          if (webAudioRef.current && webAudioRef.current.paused && typeof window !== 'undefined') {
+            const unlock = () => {
+              void playWebAudio();
+            };
+            webAudioUnlockHandlerRef.current = unlock;
+            window.addEventListener('pointerdown', unlock, { once: true });
+            window.addEventListener('keydown', unlock, { once: true });
+            window.addEventListener('touchstart', unlock, { once: true });
+          }
+
+          return;
+        }
+
+        if (!soundEnabled) {
+          if (musicRef.current) {
+            await musicRef.current.stopAsync();
+            await musicRef.current.unloadAsync();
+            musicRef.current = null;
+          }
+          return;
+        }
+
+        if (!musicRef.current) {
+          await ExpoAudio.setAudioModeAsync({
+            playsInSilentModeIOS: true,
+            shouldDuckAndroid: true,
+          });
+          const { sound } = await ExpoAudio.Sound.createAsync(
+            require('../../assets/music/bg.mp3'),
+            { isLooping: true, volume: 0.6, shouldPlay: true }
+          );
+          if (cancelled) {
+            await sound.unloadAsync();
+            return;
+          }
+          musicRef.current = sound;
+          return;
+        }
+
+        await musicRef.current.playAsync();
+      } catch {
+      }
+    };
+
+    void syncMusic();
+
+    return () => {
+      cancelled = true;
+      cleanupWebAudioUnlock();
+    };
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    return () => {
+      if (webAudioRef.current) {
+        webAudioRef.current.pause();
+        webAudioRef.current = null;
+      }
+      if (musicRef.current) {
+        void musicRef.current.unloadAsync();
+        musicRef.current = null;
+      }
+    };
+  }, []);
 
   const updateDifficulty = async (newDifficulty: Difficulty) => {
     setDifficulty(newDifficulty);
@@ -139,41 +354,58 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       newGrid.push(row);
     }
 
-    let success = false;
-    const directions = ['H', 'V'];
-    const startPositions = Array.from({ length: GRID_SIZE * GRID_SIZE }, (_, i) => ({
-      r: Math.floor(i / GRID_SIZE),
-      c: i % GRID_SIZE
-    })).sort(() => Math.random() - 0.5);
+    const deltas = [
+      { dr: 1, dc: 0 },
+      { dr: -1, dc: 0 },
+      { dr: 0, dc: 1 },
+      { dr: 0, dc: -1 },
+    ];
 
-    for (const pos of startPositions) {
-      const shuffledDirs = [...directions].sort(() => Math.random() - 0.5);
-      for (const dir of shuffledDirs) {
-        const path: { row: number; col: number }[] = [];
-        let canPlace = true;
+    let placedPath: { row: number; col: number }[] | null = null;
 
-        for (let i = 0; i < chars.length; i++) {
-          const nr = dir === 'V' ? pos.r + i : pos.r;
-          const nc = dir === 'H' ? pos.c + i : pos.c;
+    const tryPlace = () => {
+      const startRow = Math.floor(Math.random() * GRID_SIZE);
+      const startCol = Math.floor(Math.random() * GRID_SIZE);
+      const path: { row: number; col: number }[] = [{ row: startRow, col: startCol }];
+      const used = new Set<string>([`${startRow},${startCol}`]);
 
-          if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) {
-            canPlace = false;
-            break;
-          }
-          path.push({ row: nr, col: nc });
-        }
+      for (let i = 1; i < chars.length; i++) {
+        const last = path[path.length - 1];
+        const candidates = deltas
+          .map(d => ({ row: last.row + d.dr, col: last.col + d.dc }))
+          .filter(p => p.row >= 0 && p.row < GRID_SIZE && p.col >= 0 && p.col < GRID_SIZE)
+          .filter(p => !used.has(`${p.row},${p.col}`));
 
-        if (canPlace) {
-          path.forEach((p, i) => {
-            newGrid[p.row][p.col].char = chars[i];
-          });
-          setTargetWordPath(path);
-          success = true;
-          break;
-        }
+        if (candidates.length === 0) return null;
+
+        const next = candidates[Math.floor(Math.random() * candidates.length)];
+        path.push(next);
+        used.add(`${next.row},${next.col}`);
       }
-      if (success) break;
+
+      return path;
+    };
+
+    for (let attempt = 0; attempt < 300; attempt++) {
+      const path = tryPlace();
+      if (path) {
+        placedPath = path;
+        break;
+      }
     }
+
+    if (!placedPath) {
+      const fallback: { row: number; col: number }[] = [];
+      for (let i = 0; i < Math.min(chars.length, GRID_SIZE * GRID_SIZE); i++) {
+        fallback.push({ row: Math.floor(i / GRID_SIZE), col: i % GRID_SIZE });
+      }
+      placedPath = fallback;
+    }
+
+    placedPath.forEach((p, i) => {
+      if (i < chars.length) newGrid[p.row][p.col].char = chars[i];
+    });
+    setTargetWordPath(placedPath.slice(0, chars.length));
 
     for (let r = 0; r < GRID_SIZE; r++) {
       for (let c = 0; c < GRID_SIZE; c++) {
@@ -194,6 +426,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsCorrect(null);
       setHintPath([]);
       setShowErrorPopup(false);
+      setAttemptsUsed(0);
+      setLevelScore(0);
+      setRevealUsesUsed(0);
+      setShowLevelOverModal(false);
     }
   }, [currentLevelId, difficulty, generateGrid]);
 
@@ -204,18 +440,21 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentWord(grid[row][col].char);
     setHintPath([]);
     setShowErrorPopup(false);
+    setIsCorrect(null);
   };
 
   const onTouchMove = (row: number, col: number) => {
     if (!grid[row] || !grid[row][col]) return;
-    const first = selectedIndices[0];
     const last = selectedIndices[selectedIndices.length - 1];
-    if (!first || !last) return;
+    if (!last) return;
 
-    if (selectedIndices.some(idx => idx.row === row && idx.col === col)) {
+    if (last.row === row && last.col === col) return;
+
+    const alreadyIndex = selectedIndices.findIndex(idx => idx.row === row && idx.col === col);
+    if (alreadyIndex !== -1) {
       if (selectedIndices.length > 1) {
-        const secondToLast = selectedIndices[selectedIndices.length - 2];
-        if (secondToLast.row === row && secondToLast.col === col) {
+        const previous = selectedIndices[selectedIndices.length - 2];
+        if (previous.row === row && previous.col === col) {
           Haptics.selectionAsync();
           setSelectedIndices(prev => prev.slice(0, -1));
           setCurrentWord(prev => prev.slice(0, -1));
@@ -225,50 +464,38 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return;
     }
 
-    const isHorizontal = row === first.row;
-    const isVertical = col === first.col;
-    if (!isHorizontal && !isVertical) return;
+    const isAdjacent = Math.abs(row - last.row) + Math.abs(col - last.col) === 1;
+    if (!isAdjacent) return;
 
-    const rowDiff = row - last.row;
-    const colDiff = col - last.col;
-    const rowStep = Math.sign(rowDiff);
-    const colStep = Math.sign(colDiff);
-
-    if ((rowDiff !== 0 && colDiff === 0) || (rowDiff === 0 && colDiff !== 0)) {
-      const steps = Math.max(Math.abs(rowDiff), Math.abs(colDiff));
-      let tempIndices = [...selectedIndices];
-      let tempWord = currentWord;
-      let addedAny = false;
-
-      for (let i = 1; i <= steps; i++) {
-        const nextR = last.row + rowStep * i;
-        const nextC = last.col + colStep * i;
-        if (!grid[nextR] || !grid[nextR][nextC]) break;
-        if (!tempIndices.some(idx => idx.row === nextR && idx.col === nextC)) {
-          tempIndices.push({ row: nextR, col: nextC });
-          tempWord += grid[nextR][nextC].char;
-          addedAny = true;
-        }
-      }
-
-      if (addedAny) {
-        Haptics.selectionAsync();
-        setSelectedIndices(tempIndices);
-        setCurrentWord(tempWord);
-      }
-    }
+    Haptics.selectionAsync();
+    setSelectedIndices(prev => [...prev, { row, col }]);
+    setCurrentWord(prev => prev + grid[row][col].char);
   };
 
   const onTouchEnd = async () => {
     if (currentWord.length === 0) return;
-    if (currentWord === currentLevel.word.toUpperCase()) {
+    const nextAttemptsUsed = attemptsUsedRef.current + 1;
+    setAttemptsUsed(nextAttemptsUsed);
+    attemptsUsedRef.current = nextAttemptsUsed;
+
+    const target = currentLevel.word.toUpperCase();
+    const reversedTarget = target.split('').reverse().join('');
+    const isWordCorrect = currentWord === target || currentWord === reversedTarget;
+
+    if (isWordCorrect) {
+      const pointsPerTile = 100;
+      const attemptPoints = Math.max(1, selectedIndices.length) * pointsPerTile;
+      let nextScore = levelScoreRef.current + attemptPoints;
       setIsCorrect(true);
+      nextScore += 1000;
+      setLevelScore(nextScore);
+      levelScoreRef.current = nextScore;
+      await maybeUpdateBestScore(currentLevel.id, nextScore);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setTimeout(() => {
-        const currentIndexInDifficulty = filteredLevels.findIndex(l => l.id === currentLevelId);
-        const nextLevelInDifficulty = filteredLevels[currentIndexInDifficulty + 1];
+        const nextLevelInDifficulty = filteredLevels[currentLevelIndex + 1];
         let newUnlockedCount = unlockedLevelCount;
-        if (currentIndexInDifficulty + 1 === unlockedLevelCount && unlockedLevelCount < 20) {
+        if (currentLevelIndex + 1 === unlockedLevelCount && unlockedLevelCount < 20) {
           newUnlockedCount = unlockedLevelCount + 1;
           setUnlockedLevelCount(newUnlockedCount);
         }
@@ -281,8 +508,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }, 1500);
     } else {
       setIsCorrect(false);
-      setShowErrorPopup(true);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+
+      if (nextAttemptsUsed >= maxAttempts) {
+        setShowLevelOverModal(true);
+        setSelectedIndices([]);
+        setCurrentWord('');
+        setHintPath([]);
+        setShowErrorPopup(false);
+        return;
+      }
+
+      setShowErrorPopup(true);
       setTimeout(() => {
         setSelectedIndices([]);
         setCurrentWord('');
@@ -293,9 +530,49 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const revealHint = () => {
+    if (difficulty === 'Easy') return;
+    if (revealUsesUsed >= revealLimit) return;
+    if (targetWordPath.length === 0) return;
+    setRevealUsesUsed(prev => prev + 1);
     setHintPath(targetWordPath);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setTimeout(() => setHintPath([]), 3000);
+  };
+
+  const replayLevel = () => {
+    setShowLevelOverModal(false);
+    setSelectedIndices([]);
+    setCurrentWord('');
+    setIsCorrect(null);
+    setHintPath([]);
+    setShowErrorPopup(false);
+    setAttemptsUsed(0);
+    attemptsUsedRef.current = 0;
+    setLevelScore(0);
+    levelScoreRef.current = 0;
+    setRevealUsesUsed(0);
+    generateGrid(currentLevel.word);
+  };
+
+  const closeLevelOverModal = () => {
+    setShowLevelOverModal(false);
+  };
+
+  const advanceFromLevelOver = () => {
+    if (!canAdvanceFromLevelOver) return;
+    setShowLevelOverModal(false);
+    const nextLevelInDifficulty = filteredLevels[currentLevelIndex + 1];
+    let newUnlockedCount = unlockedLevelCount;
+    if (currentLevelIndex + 1 === unlockedLevelCount && unlockedLevelCount < 20) {
+      newUnlockedCount = unlockedLevelCount + 1;
+      setUnlockedLevelCount(newUnlockedCount);
+    }
+    if (nextLevelInDifficulty) {
+      setCurrentLevelId(nextLevelInDifficulty.id);
+      saveProgression(nextLevelInDifficulty.id, newUnlockedCount, difficulty);
+    } else {
+      router.replace('/game-over');
+    }
   };
 
   const resetGame = async () => {
@@ -307,16 +584,44 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await SecureStore.deleteItemAsync(UNLOCKED_LEVELS_KEY + 'Easy');
       await SecureStore.deleteItemAsync(UNLOCKED_LEVELS_KEY + 'Medium');
       await SecureStore.deleteItemAsync(UNLOCKED_LEVELS_KEY + 'Hard');
+      await SecureStore.deleteItemAsync(SOUND_ENABLED_KEY);
+      await SecureStore.deleteItemAsync(BEST_SCORES_KEY);
     }
     setDifficulty('Easy');
     setCurrentLevelId(1);
     setUnlockedLevelCount(1);
+    setSoundEnabledState(true);
+    setBestScores({});
   };
 
   return (
     <GameContext.Provider value={{
-      currentLevel, grid, selectedIndices, currentWord, isCorrect, hintPath,
-      difficulty, showErrorPopup, unlockedLevelCount, filteredLevels,
+      currentLevel,
+      currentLevelIndex,
+      grid,
+      selectedIndices,
+      currentWord,
+      isCorrect,
+      hintPath,
+      difficulty,
+      soundEnabled,
+      setSoundEnabled,
+      showErrorPopup,
+      unlockedLevelCount,
+      filteredLevels,
+      maxAttempts,
+      attemptsUsed,
+      attemptsLeft,
+      levelScore,
+      passScore,
+      revealUsesUsed,
+      revealUsesLeft,
+      showLevelOverModal,
+      canAdvanceFromLevelOver,
+      replayLevel,
+      closeLevelOverModal,
+      advanceFromLevelOver,
+      getBestScore,
       onTouchStart, onTouchMove, onTouchEnd, revealHint, resetGame,
       updateDifficulty, selectLevel, currentLevelId
     }}>

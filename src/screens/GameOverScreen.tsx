@@ -14,7 +14,7 @@ const GameOverScreen = () => {
           <Trophy color="white" size={48} />
         </View>
         <Text style={s`text-white text-4xl font-bold mb-2`}>Congratulations!</Text>
-        <Text style={s`text-slate-400 text-lg text-center`}>
+        <Text style={s`text-gray-400 text-lg text-center`}>
           You've completed all available levels in AlphaShift.
         </Text>
       </View>
